@@ -35,19 +35,74 @@ import sys
 import traceback
 import os
 import copy
+import netrc
+try:
+    # py3k
+    from urllib.request import urlopen, HTTPPasswordMgrWithDefaultRealm, \
+        HTTPBasicAuthHandler, install_opener, build_opener
+    from urllib.parse import urlparse
+except ImportError:
+    # py2.7
+    from urlparse import urlparse
+    from urllib2 import urlopen, HTTPPasswordMgrWithDefaultRealm, \
+        HTTPBasicAuthHandler, install_opener, build_opener
+
 # choosing multiprocessing over threading for clean Control-C
 # interrupts (provides terminate())
-try:
-    from urlparse import urlparse
-except ImportError:
-    from urllib.parse import urlparse
-
 from multiprocessing import Process, Manager
 from vcstools.vcs_base import VcsError
 
 
 class MultiProjectException(Exception):
     pass
+
+
+def common_urlopen(uri, *args, **kwargs):
+    '''
+    wrapper to urlopen, using netrc on 401 as fallback
+    Since this wraps both python2 and python3 urlopen, accepted arguments vary
+    '''
+    # recipe from http://www.voidspace.org.uk/python/articles/authentication.shtml
+    try:
+        return urlopen(uri, *args, **kwargs)
+    except IOError as ioe:
+        if hasattr(ioe, 'code') and ioe.code == 401:
+            authline = ioe.headers['www-authenticate']
+            parsed_uri = urlparse(uri)
+            if parsed_uri.netloc:
+                (user, passwd) = get_netrc(parsed_uri.netloc)
+                if user and passwd:
+                    # this creates a password manager
+                    passman = HTTPPasswordMgrWithDefaultRealm()
+                    passman.add_password(None, parsed_uri.netloc, user, passwd)
+                    authhandler = HTTPBasicAuthHandler(passman)
+                    opener = build_opener(authhandler)
+                    install_opener(opener)
+                    return urlopen(uri, *args, **kwargs)
+        raise
+
+
+def get_netrc(machine, filename=None):
+    '''
+    Get username and password from netrc
+
+    :param machine: key to look up in netrc file
+    :param filename: optional, path to non-default netrc config file
+    '''
+    try:
+        info = netrc.netrc(filename).authenticators(machine)
+        if info is not None:
+            (username, _ , password) = info
+            return (username, password)
+        else:
+            raise netrc.NetrcParseError('No authenticators for %s' % machine)
+    except IOError as ioe:
+        if ioe.errno != 2:
+            raise
+        # if = 2, User probably has no .netrc, this is not an error
+    except netrc.NetrcParseError as neterr:
+        print('WARNING: parsing .netrc: %s' % str(neterr))
+    return (None, None)
 
 
 def samefile(file1, file2):
